@@ -1,5 +1,6 @@
 /**
  * GUY 1 (BYCER): Cryptographic SHA-256 Hash-Chained Audit Ledger
+ * + Forensic PayPal Dispute Evidence Packet Generator
  */
 
 const crypto = require("crypto");
@@ -75,9 +76,41 @@ function verifyAuditChain(entries = []) {
   };
 }
 
+function generateDisputeEvidencePacket(auditRow) {
+  const recalculated = computeEntryHash(auditRow, auditRow.prev_hash);
+  const hashIntact = recalculated === auditRow.entry_hash;
+
+  return {
+    evidence_packet_id: `ev_${Date.now()}`,
+    generated_at: new Date().toISOString(),
+    paypal_dispute_ready: true,
+    transaction_reference: {
+      paypal_order_id: auditRow.paypal_order_id || "N/A (Blocked Pre-Execution)",
+      payment_status: auditRow.payment_status,
+      merchant_id: auditRow.merchant,
+      item_summary: auditRow.request_summary,
+      quoted_amount_usd: Number(auditRow.quoted_amount),
+      checkout_amount_usd: Number(auditRow.checkout_amount),
+    },
+    policy_gate_forensics: {
+      verdict: auditRow.decision,
+      risk_score: auditRow.risk_score,
+      deterministic_reason: auditRow.reason,
+    },
+    cryptographic_proof: {
+      algorithm: "SHA-256 Append-Only Hash Chain",
+      previous_block_hash: auditRow.prev_hash,
+      entry_hash: auditRow.entry_hash,
+      recalculated_hash: recalculated,
+      tamper_evident_status: hashIntact ? "VERIFIED_INTACT" : "TAMPERED_INVALID",
+    },
+  };
+}
+
 module.exports = {
   GENESIS_HASH,
   computeEntryHash,
   createAuditLogEntry,
   verifyAuditChain,
+  generateDisputeEvidencePacket,
 };
