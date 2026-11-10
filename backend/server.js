@@ -165,3 +165,14 @@ app.get("/api/evidence/:id", (req, res) => {
 app.listen(PORT, () => {
   console.log(`🛡️ Warden Backend Server running live on http://localhost:${PORT}`);
 });
+
+// GET /api/audit/dispute/:id -> Generates PayPal dispute evidence packet for frontend
+app.get("/api/audit/dispute/:id", (req, res) => {
+  const rowId = Number(req.params.id);
+  const row = memoryAuditLogs.find((r) => r.id === rowId);
+  if (!row) {
+    return res.status(404).json({ error: "Audit block not found" });
+  }
+  const packet = generateDisputeEvidencePacket(row, memoryAuditLogs);
+  res.json(packet);
+});

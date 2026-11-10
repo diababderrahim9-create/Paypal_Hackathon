@@ -1,6 +1,6 @@
 /**
  * GUY 1 (BYCER): Cryptographic SHA-256 Hash-Chained Audit Ledger
- * + Forensic PayPal Dispute Evidence Packet Generator
+ * + Phase 4 Forensic PayPal Dispute Evidence Packet Integration
  */
 
 const crypto = require("crypto");
@@ -30,6 +30,7 @@ function createAuditLogEntry(evaluatedIntent, prevHash = GENESIS_HASH, extra = {
 
   const draftEntry = {
     timestamp: evaluatedIntent.timestamp || new Date().toISOString(),
+    user_prompt: evaluatedIntent.user_prompt || "",
     request_summary: q.product_name || evaluatedIntent.user_prompt,
     merchant: q.merchant_id,
     quoted_amount: q.quoted_price,
@@ -37,8 +38,19 @@ function createAuditLogEntry(evaluatedIntent, prevHash = GENESIS_HASH, extra = {
     decision: p.decision,
     reason: p.reason,
     risk_score: p.risk_score,
+    raw_html:
+      extra.raw_html ||
+      (q.stripped_payload
+        ? `Stripped Injection: ${q.stripped_payload}`
+        : "Clean structured metadata extracted by Quarantine LLM"),
     paypal_order_id: extra.paypal_order_id || null,
-    payment_status: extra.payment_status || (p.decision === "DENY" ? "BLOCKED" : p.decision === "ASK_HUMAN" ? "AWAITING_APPROVAL" : "PENDING_EXECUTION"),
+    payment_status:
+      extra.payment_status ||
+      (p.decision === "DENY"
+        ? "BLOCKED"
+        : p.decision === "ASK_HUMAN"
+        ? "AWAITING_APPROVAL"
+        : "PENDING_EXECUTION"),
     prev_hash: prevHash || GENESIS_HASH,
   };
 
@@ -76,34 +88,12 @@ function verifyAuditChain(entries = []) {
   };
 }
 
-function generateDisputeEvidencePacket(auditRow) {
-  const recalculated = computeEntryHash(auditRow, auditRow.prev_hash);
-  const hashIntact = recalculated === auditRow.entry_hash;
-
+function generateDisputeEvidencePacket(auditRow, allLogs = []) {
+  const { buildDisputeEvidenceBundle, generatePrintableDisputeHTML } = require("./disputeEvidence");
+  const bundle = buildDisputeEvidenceBundle(auditRow, allLogs);
   return {
-    evidence_packet_id: `ev_${Date.now()}`,
-    generated_at: new Date().toISOString(),
-    paypal_dispute_ready: true,
-    transaction_reference: {
-      paypal_order_id: auditRow.paypal_order_id || "N/A (Blocked Pre-Execution)",
-      payment_status: auditRow.payment_status,
-      merchant_id: auditRow.merchant,
-      item_summary: auditRow.request_summary,
-      quoted_amount_usd: Number(auditRow.quoted_amount),
-      checkout_amount_usd: Number(auditRow.checkout_amount),
-    },
-    policy_gate_forensics: {
-      verdict: auditRow.decision,
-      risk_score: auditRow.risk_score,
-      deterministic_reason: auditRow.reason,
-    },
-    cryptographic_proof: {
-      algorithm: "SHA-256 Append-Only Hash Chain",
-      previous_block_hash: auditRow.prev_hash,
-      entry_hash: auditRow.entry_hash,
-      recalculated_hash: recalculated,
-      tamper_evident_status: hashIntact ? "VERIFIED_INTACT" : "TAMPERED_INVALID",
-    },
+    ...bundle,
+    printable_html: generatePrintableDisputeHTML(bundle),
   };
 }
 
