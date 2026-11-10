@@ -1,0 +1,18 @@
+{
+  "PurchaseIntent_Example": {
+    "intent_id": "int_01",
+    "user_prompt": "Buy USB-C Security Key under $50",
+    "quarantine_extracted": {
+      "product_id": "prod_01",
+      "product_name": "TitanVault USB-C Key",
+      "merchant_id": "merch_technova",
+      "quoted_price": 45.00,
+      "injection_detected": false
+    },
+    "policy_evaluation": {
+      "decision": "ALLOW",
+      "risk_score": 5,
+      "reason": "All 5 deterministic security gates passed."
+    }
+  }
+}
