@@ -1,0 +1,45 @@
+# Warden API on Render.
+# SQLite on the default container disk is wiped on every deploy and restart.
+# This service mounts a persistent disk and refuses to boot on Render without DB_PATH.
+# Demo tamper stays opt-in (WARDEN_DEMO_TAMPER). Turn both demo flags off outside the hackathon demo.
+
+services:
+  - type: web
+    name: warden-api
+    runtime: node
+    plan: starter
+    numInstances: 1
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 22.16.0
+      - key: NODE_ENV
+        value: production
+      - key: PAYPAL_API_BASE
+        value: https://api-m.sandbox.paypal.com
+      - key: DB_PATH
+        value: /var/data/warden.db
+      - key: WARDEN_ENABLE_DEMO_ROUTES
+        value: "1"
+      - key: WARDEN_DEMO_TAMPER
+        value: "0"
+      - key: WARDEN_SHOPPER_LLM
+        value: "0"
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: PAYPAL_WEBHOOK_ID
+        sync: false
+      - key: PAYPAL_BRAND_NAME
+        value: Warden
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: CORS_ORIGIN
+        sync: false
+    disk:
+      name: warden-sqlite
+      mountPath: /var/data
+      sizeGB: 1

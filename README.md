@@ -102,9 +102,9 @@ flowchart TD
 | Attack Lab Storefront (mock catalog + price checks) | `backend/catalog/attackStorefront.js` | Implemented |
 | Deterministic Policy Engine | `backend/security/policyEngine.js` | Implemented |
 | SHA-256 Audit Chain | `backend/security/auditChain.js` | Implemented |
-| PayPal Executor | `backend/paypal/paypalExecutor.js` | Stub |
-| Audit storage | `backend/db/database.js` | Stub |
-| Express server entry | `backend/server.js` | Stub |
+| PayPal Executor | `backend/paypal/paypalExecutor.js` | Orders v2 Sandbox create, inspect, capture, and webhook verification |
+| Audit storage | `backend/db/index.js` | SQLite intents, idempotency, webhook deduplication, and audit ledger |
+| Express server entry | `backend/server.js` | REST API, demo scenarios, metrics, and evidence endpoints |
 | React dashboard | `frontend/src/App.jsx` | Stub |
 
 ## End-to-End Purchase Workflow
@@ -117,7 +117,9 @@ The implemented pipeline in `backend/agents/shopperAgent.js` proceeds as follows
 4. The Quarantine LLM returns only structured fields: `product_id`, `product_name`, `merchant_id`, `quoted_price`, `currency`, `injection_detected`, and `stripped_payload`.
 5. The agent selects a product and emits a structured purchase intent via `propose_purchase`.
 6. The intent is evaluated by the Deterministic Policy Engine.
-7. On `ALLOW`, an audit log entry is created; execution (PayPal) remains gated by the decision.
+7. The backend rechecks the server-side catalog, quote, merchant, intent alignment, budget, and velocity before creating a PayPal Sandbox order. The Shopper Agent never receives a PayPal tool.
+8. A buyer approves through PayPal. `ASK_HUMAN` decisions also require a short-lived, one-time Warden approval token before capture.
+9. `POST /api/paypal/capture` accepts only `{ "intent_id": "..." }`; the server loads the order and amount, verifies buyer approval and live order details, then captures through PayPal.
 
 The pipeline can be exercised directly. This example is verified against the repository:
 
@@ -172,7 +174,7 @@ The policy engine (`backend/security/policyEngine.js`) computes a risk score and
 |---|---|---|
 | `autoApproveLimit` | `50.00` | Clean purchases at or below this amount are auto-approved; above it, the decision is `ASK_HUMAN`. |
 | `hardTransactionCap` | `150.00` | Absolute per-transaction spending cap; violations are denied. |
-| `dailyBudgetCap` | `300.00` | Cumulative daily spending budget (updated via `recordSuccessfulSpend`). |
+| `dailyBudgetCap` | `300.00` | Cumulative daily spending budget; open and in-flight orders reserve budget persistently. |
 | `maxTxPerMinute` | `3` | Maximum purchases allowed per minute (velocity limit). |
 | `allowedMerchants` | `merch_technova`, `merch_cyberdock`, `merch_shadydeals` | Verified allowlist of merchants. |
 
@@ -225,30 +227,36 @@ Verified execution results (deterministic fallback used when no LLM API key is c
 |---|---|
 | Language | JavaScript (Node.js runtime; CommonJS modules) |
 | Server | Express (declared in source comments; server entry not yet implemented) |
-| UI | React + AG Grid (declared in source comments; placeholder only) |
-| LLM | OpenAI-compatible chat-completions REST API via `fetch` (default model `gpt-4o-mini`, temperature 0.0, strict JSON schema) |
+| UI | React + Vite + Tailwind CSS + AG Grid Community |
+| LLM | Optional OpenAI-compatible chat-completions REST API via `fetch`; shopper tools are limited to search/propose |
 | Cryptography | Node.js `crypto` — SHA-256 |
-| Storage | SQLite / PostgreSQL (planned; module stub) |
-| Payments | PayPal Orders API v2 (planned; executor stub) |
+| Storage | Node.js `node:sqlite` with a persistent Render disk |
+| Payments | PayPal Orders API v2 Sandbox |
 
 ## Repository Structure
 
 ```text
 Paypal_Hackathon/
 ├── backend/
-│   ├── server.js                    # Express server entry (readiness stub)
+│   ├── server.js                    # Express API and listener
 │   ├── agents/
-│   │   ├── shopperAgent.js         # Shopper agent, tool boundary, demo scenarios
+│   │   ├── shopperAgent.js         # Shopper tool boundary, optional LLM, demo scenarios
 │   │   └── quarantineLLM.js        # Quarantine defense, injection patterns, extraction
 │   ├── catalog/
 │   │   └── attackStorefront.js     # Mock catalog, attack toggles, live price checks
 │   ├── db/
-│   │   └── database.js             # Audit storage (stub)
+│   │   ├── database.js             # Backward-compatible database entry
+│   │   └── index.js                # SQLite intents and audit persistence
 │   ├── paypal/
-│   │   └── paypalExecutor.js      # PayPal execution (stub)
+│   │   ├── paypalExecutor.js       # Sandbox Orders v2 client
+│   │   ├── purchaseRoute.js        # Purchase, idempotency, human approval
+│   │   ├── captureRoute.js         # Server-side capture
+│   │   └── webhookRoute.js         # Verified, deduplicated webhook events
 │   └── security/
 │       ├── policyEngine.js         # Deterministic allow/deny policy
 │       └── auditChain.js           # SHA-256 audit chain, dispute packet
+│   ├── testPurchase.js             # Offline four-scenario test
+│   └── testBackend.js              # Offline API/lifecycle/security tests
 ├── docs/
 │   └── NOTES.md                     # Architecture notes (placeholder)
 ├── frontend/
@@ -268,8 +276,8 @@ git clone https://github.com/diababderrahim9-create/Paypal_Hackathon.git
 cd Paypal_Hackathon
 ```
 
-- The repository does not currently include a dependency manifest (`package.json`); there is no `npm install` step defined yet. The backend modules are plain CommonJS JavaScript.
-- A Node.js runtime with global `fetch` support (Node.js 18 or newer) is required by the source code.
+- Use Node.js 22.13 or newer (required by the built-in `node:sqlite` module).
+- Install locked dependencies with `npm ci`.
 
 ## Environment Configuration
 
@@ -282,24 +290,55 @@ cp .env.example .env
 | Variable | Source of truth | Description | Default / placeholder |
 |---|---|---|---|
 | `PORT` | `.env.example` | Backend port | `4000` |
+| `PAYPAL_API_BASE` | `.env.example` | PayPal API URL; executor refuses non-Sandbox hosts | `https://api-m.sandbox.paypal.com` |
 | `PAYPAL_CLIENT_ID` | `.env.example` | PayPal client ID | `put_sandbox_client_id_here` |
 | `PAYPAL_CLIENT_SECRET` | `.env.example` | PayPal client secret | `put_sandbox_secret_here` |
-| `PAYPAL_MODE` | `.env.example` | PayPal mode | `sandbox` |
-| `LLM_API_KEY` | `backend/agents/quarantineLLM.js` | Quarantine LLM API key | `put_gemini_or_openai_key_here` |
-| `OPENAI_API_KEY` | `backend/agents/quarantineLLM.js` | Fallback quarantine LLM key | — |
-| `LLM_BASE_URL` | `backend/agents/quarantineLLM.js` | Quarantine LLM endpoint | `https://api.openai.com/v1/chat/completions` |
-| `LLM_MODEL` | `backend/agents/quarantineLLM.js` | Quarantine LLM model | `gpt-4o-mini` |
-| `DATABASE_URL` | `.env.example` | Database connection | `sqlite://./warden.db` |
+| `PAYPAL_BRAND_NAME` | `.env.example` | PayPal checkout brand | `Warden` |
+| `PAYPAL_WEBHOOK_ID` | `.env.example` | Registered Sandbox webhook id | — |
+| `PUBLIC_BASE_URL` | `.env.example` | Public backend URL used for PayPal return/cancel URLs | `http://localhost:4000` |
+| `DB_PATH` | `.env.example` | SQLite file path; Render must use the persistent disk | `./warden.db` |
+| `CORS_ORIGIN` | `.env.example` | Comma-separated allowed browser origins; configure in production | — |
+| `LLM_API_KEY` | `.env.example` | Optional Quarantine/Shopper LLM key | — |
+| `LLM_BASE_URL` | `.env.example` | OpenAI-compatible chat-completions endpoint | `https://api.openai.com/v1/chat/completions` |
+| `LLM_MODEL` | `.env.example` | Quarantine/Shopper model | `gpt-4o-mini` |
+| `WARDEN_SHOPPER_LLM` | `.env.example` | Enable the Shopper LLM; deterministic policy still authorizes | `0` |
+| `WARDEN_ENABLE_DEMO_ROUTES` | `.env.example` | Enable attack/reset demo routes in production | off |
+| `WARDEN_DEMO_TAMPER` | `.env.example` | Explicit production opt-in for the tamper demo | off |
 
 ## Running the Application
 
-The current `backend/server.js` entry point only logs a readiness message and does not yet wire an Express listener, REST API, or database.
+Start the backend API:
 
-To run the demo scenarios directly:
-
-```bash
-node -e "const { runDemoScenario } = require('./backend/agents/shopperAgent'); runDemoScenario('HAPPY_PATH_45').then(r => console.log(r.evaluated_intent.policy_evaluation.decision))"
+```sh
+npm start
 ```
+
+The API health check is `GET /api/health`. Offline integration tests (using a fake PayPal adapter and temporary SQLite databases) run with `npm test`.
+
+Important endpoints:
+
+- `POST /api/purchase` accepts `{ user_prompt, quarantine_extracted }`; the server rechecks catalog data and policy.
+- `POST /api/purchase/approve` accepts `{ intent_id, approval_token }` for a one-time Warden approval.
+- `POST /api/purchase/reject` accepts the same scoped, one-time approval token to reject an awaiting intent; the rejection is persisted and audited.
+- `POST /api/paypal/capture` accepts only `{ intent_id }` and still requires buyer approval in PayPal.
+- `POST /api/paypal/webhook` verifies signatures using the configured `PAYPAL_WEBHOOK_ID`.
+- `GET /api/logs`, `GET /api/metrics`, and `GET /api/audit/verify` feed the audit/Command Center integration.
+- `POST /api/demo/attack` toggles attack modes. The tamper route is off in production unless explicitly enabled.
+
+The Shopper LLM is opt-in (`WARDEN_SHOPPER_LLM=1`). It receives sanitized catalog fields and only `search_products`/`propose_purchase` tools. With it disabled or unavailable, the deterministic demo selector runs; all purchases still pass through the same deterministic policy and PayPal executor boundary.
+
+### Command Center
+
+The React + Vite dashboard runs against the same API. For local development, start the API and UI in separate terminals:
+
+```sh
+npm run dev:api
+npm run dev
+```
+
+The Vite server proxies `/api` and `/paypal` to `http://127.0.0.1:4000`. Set `VITE_API_PROXY_TARGET` to use another local API origin, or `VITE_API_BASE_URL` when building a separately hosted frontend. `npm run build` creates `frontend/dist`; the backend serves that build when it exists. The PayPal button uses the order ID created by WARDEN and calls `/api/paypal/capture` with the intent ID only after buyer approval. A public Sandbox client ID is needed to render the button; secrets remain backend-only.
+
+The audit tamper control is shown only when `/api/health` reports `demo_tamper_enabled`. Production must explicitly opt in with `WARDEN_DEMO_TAMPER=1`; the dashboard also requires selecting a ledger row, checking the demo warning, and confirming the operation.
 
 ## Demo Instructions
 
@@ -328,23 +367,9 @@ See [Attack Lab and Demo Scenarios](#attack-lab-and-demo-scenarios) for the expe
 - Shopper agent pipeline and four demo scenarios.
 - Mock Attack Lab storefront with injection and price-drift toggles.
 
-**Not implemented (stubs):**
+**Backend status:** the Express API, SQLite persistence, deterministic policy, audit chain, purchase/capture lifecycle, idempotency, human approval/rejection, webhook verification, four demo scenarios, and Render persistent-disk configuration are implemented. The Command Center provides the React + Vite dashboard, AG Grid audit ledger, attack controls, approval flow, and PayPal Sandbox buyer checkout.
 
-- `backend/server.js` — no Express app or listener.
-- `backend/paypal/paypalExecutor.js` — empty module; no PayPal execution.
-- `backend/db/database.js` — empty module; no audit persistence.
-- `frontend/src/App.jsx` — placeholder only.
-- `docs/NOTES.md` — title only.
-
-There is no committed test suite, CI workflow, or dependency manifest yet.
-
-## Future Improvements
-
-- Wire the Express server with REST endpoints to submit intents and retrieve audit chains.
-- Implement PayPal Orders API execution and webhook handling.
-- Persist the audit chain to the configured database.
-- Build the React + AG Grid dashboard with attack-lab controls.
-- Add human-in-the-loop approval integration for `ASK_HUMAN` decisions.
+The offline suite uses a fake PayPal adapter; it proves Warden's API and state transitions, not a real PayPal transaction. Real Sandbox order creation requires valid Sandbox credentials and buyer approval. The existing project notes report `COMPLIANCE_VIOLATION` during capture; this can be an account/country restriction and has not been independently re-tested here. Do not treat it as a successful capture or bypass PayPal compliance.
 
 ## License and Acknowledgments
 

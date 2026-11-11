@@ -1,178 +1,278 @@
-/**
- * WARDEN BACKEND SERVER (Express Entry Point)
- * Coordinates Guy 1 (Security/AI), Guy 2 (PayPal/DB), and Guy 3 (UI).
- */
+'use strict';
 
-const express = require("express");
-const cors = require("cors");
+const path = require('path');
+const fs = require('fs');
+const dotenv = require('dotenv');
+const cors = require('cors');
+const express = require('express');
+
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
+
+const { getLogs, tamperRow, intents, DB_PATH } = require('./db');
 const {
-  runDemoScenario,
-  runWardenPipeline,
-  computeDashboardCounters,
-  getAttackLabState,
-  setAttackLabState,
-  resetPolicyState,
-} = require("./agents/shopperAgent");
-const { verifyAuditChain, generateDisputeEvidencePacket } = require("./security/auditChain");
+  purchaseRoute,
+  createPurchaseRoute,
+  approveRoute,
+  rejectRoute,
+} = require('./paypal/purchaseRoute');
+const captureRoute = require('./paypal/captureRoute');
+const webhookRoute = require('./paypal/webhookRoute');
+const { verifyChain } = require('./security/auditChain');
+const { buildDisputeEvidenceBundle } = require('./security/disputeEvidence');
+const { setAttackMode, getAttackMode, listPublicCatalog } = require('./catalog/attackStorefront');
+const { computeDashboardCounters } = require('./agents/shopperAgent');
 
-const app = express();
-app.use(express.json());
-app.use(cors());
+function demoAllowed(kind) {
+  if (process.env.NODE_ENV !== 'production') return true;
+  if (kind === 'tamper') return process.env.WARDEN_DEMO_TAMPER === '1';
+  return process.env.WARDEN_ENABLE_DEMO_ROUTES === '1';
+}
 
-const PORT = process.env.PORT || 4000;
+function publicIntent(row) {
+  if (!row) return null;
+  const { approval_token_hash, ...safe } = row;
+  return safe;
+}
 
-// In-memory audit log store for zero-config live demo
-let memoryAuditLogs = [];
+function createApp(options = {}) {
+  const app = express();
+  const origin = process.env.CORS_ORIGIN
+    ? process.env.CORS_ORIGIN.split(',').map((s) => s.trim())
+    : process.env.NODE_ENV === 'production'
+      ? false
+      : true;
 
-// GET /api/logs -> Returns ledger rows, chain verification status, and counters
-app.get("/api/logs", (req, res) => {
-  const chainStatus = verifyAuditChain(memoryAuditLogs);
-  const counters = computeDashboardCounters(memoryAuditLogs);
-  res.json({
-    logs: memoryAuditLogs,
-    chain_status: chainStatus,
-    counters,
+  app.use(cors({ origin }));
+  app.use(
+    express.json({
+      limit: '100kb',
+      verify: (req, _res, buf) => {
+        req.rawBody = buf.toString('utf8');
+      },
+    })
+  );
+
+  app.get('/api/health', (req, res) => {
+    res.json({
+      ok: true,
+      sandbox: true,
+      demo_routes_enabled: demoAllowed('attack'),
+      demo_tamper_enabled: demoAllowed('tamper'),
+    });
   });
-});
 
-// POST /api/demo/scenario -> Triggers one of the 4 Judge Demo Buttons
-app.post("/api/demo/scenario", async (req, res) => {
-  try {
-    const { scenario_key } = req.body;
-    const prevHash =
-      memoryAuditLogs.length > 0
-        ? memoryAuditLogs[memoryAuditLogs.length - 1].entry_hash
-        : undefined;
+  app.get('/api/logs', (req, res) => {
+    res.json(getLogs());
+  });
 
-    const result = await runDemoScenario(scenario_key, prevHash);
-    
-    // Assign incremental ID if database row
-    const newEntry = {
-      id: memoryAuditLogs.length + 1,
-      ...result.audit_log_entry,
-    };
-
-    memoryAuditLogs.push(newEntry);
-
-    const chainStatus = verifyAuditChain(memoryAuditLogs);
-    const counters = computeDashboardCounters(memoryAuditLogs);
-
-    res.json({
-      success: true,
-      last_run: result,
-      logs: memoryAuditLogs,
-      chain_status: chainStatus,
-      counters,
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// POST /api/agent/purchase -> Custom prompt execution
-app.post("/api/agent/purchase", async (req, res) => {
-  try {
-    const { prompt } = req.body;
-    const prevHash =
-      memoryAuditLogs.length > 0
-        ? memoryAuditLogs[memoryAuditLogs.length - 1].entry_hash
-        : undefined;
-
-    const result = await runWardenPipeline(prompt, { prevHash });
-    const newEntry = {
-      id: memoryAuditLogs.length + 1,
-      ...result.audit_log_entry,
-    };
-
-    memoryAuditLogs.push(newEntry);
-
-    res.json({
-      success: true,
-      result,
-      logs: memoryAuditLogs,
-      chain_status: verifyAuditChain(memoryAuditLogs),
-      counters: computeDashboardCounters(memoryAuditLogs),
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// POST /api/paypal/approve/:id -> Approves an ASK_HUMAN pending order
-app.post("/api/paypal/approve/:id", (req, res) => {
-  const rowId = Number(req.params.id);
-  memoryAuditLogs = memoryAuditLogs.map((row) => {
-    if (row.id === rowId) {
-      return {
-        ...row,
-        decision: "ALLOW",
-        payment_status: "CAPTURED",
-        paypal_order_id: `PAYPAL-SBX-CAPTURED-${Math.floor(100000 + Math.random() * 900000)}`,
-        reason: "Approved by Human Payer via PayPal Sandbox 1-Click Popup.",
-      };
+  app.get('/api/metrics', (req, res) => {
+    const logs = getLogs();
+    const counters = computeDashboardCounters(logs);
+    const decisions = { ALLOW: 0, ASK_HUMAN: 0, DENY: 0 };
+    for (const row of logs) {
+      if (decisions[row.decision] !== undefined) decisions[row.decision] += 1;
     }
-    return row;
+    const captured = logs.filter((row) => row.payment_status === 'CAPTURED');
+    const spent = captured.reduce((sum, row) => sum + Number(row.checkout_amount || 0), 0);
+    res.json({
+      ...counters,
+      total_spent: Number(spent.toFixed(2)),
+      decisions,
+      captured: captured.length,
+      intents: intents.list().length,
+      attack_mode: getAttackMode(),
+      chain: verifyChain(),
+    });
   });
 
-  res.json({
-    success: true,
-    logs: memoryAuditLogs,
-    chain_status: verifyAuditChain(memoryAuditLogs),
-    counters: computeDashboardCounters(memoryAuditLogs),
+  app.get('/api/catalog', (req, res) => {
+    res.json({ products: listPublicCatalog(), attack_mode: getAttackMode() });
   });
-});
 
-// POST /api/audit/tamper -> Simulates DB tampering to test hash chain defense
-app.post("/api/audit/tamper", (req, res) => {
-  if (memoryAuditLogs.length > 0) {
-    // Tamper with the first block's amount
-    memoryAuditLogs[0].checkout_amount = 1.00;
+  app.get('/api/intents', (req, res) => {
+    res.json(intents.list().map(publicIntent));
+  });
+
+  app.get('/api/intents/:id', (req, res) => {
+    const row = intents.get(req.params.id);
+    if (!row) return res.status(404).json({ error: 'unknown intent' });
+    res.json(publicIntent(row));
+  });
+
+  app.get('/api/paypal/config', (req, res) => {
+    res.json({
+      clientId: process.env.PAYPAL_CLIENT_ID || null,
+      currency: 'USD',
+      sandbox: true,
+    });
+  });
+
+  app.get('/api/audit/verify', (req, res) => {
+    res.json(verifyChain());
+  });
+
+  app.get('/api/audit/:id/evidence', (req, res) => {
+    const logs = getLogs();
+    const row = logs.find((entry) => String(entry.id) === String(req.params.id));
+    if (!row) return res.status(404).json({ error: 'audit row not found' });
+    res.json(buildDisputeEvidenceBundle(row, logs));
+  });
+
+  app.get('/api/scenarios', (req, res) => {
+    const { DEMO_SCENARIOS } = require('./agents/shopperAgent');
+    res.json(Object.values(DEMO_SCENARIOS).map(s => ({
+      scenario_key: s.scenario_key,
+      button_label: s.button_label,
+      badge_color: s.badge_color,
+    })));
+  });
+
+  app.get('/api/audit/:id/evidence/html', (req, res) => {
+    const { generatePrintableDisputeHTML } = require('./security/disputeEvidence');
+    const logs = getLogs();
+    const row = logs.find((entry) => String(entry.id) === String(req.params.id));
+    if (!row) return res.status(404).json({ error: 'audit row not found' });
+    const bundle = buildDisputeEvidenceBundle(row, logs);
+    const html = generatePrintableDisputeHTML(bundle);
+    res.type('html').send(html);
+  });
+
+  app.post(
+    '/api/purchase',
+    options.purchaseDeps ? createPurchaseRoute(options.purchaseDeps) : purchaseRoute
+  );
+  app.post('/api/purchase/approve', approveRoute);
+  app.post('/api/purchase/reject', rejectRoute);
+  app.post('/api/paypal/capture', captureRoute);
+  app.post('/api/paypal/webhook', webhookRoute);
+
+  app.post('/api/shop', async (req, res) => {
+    try {
+      const { runDemoScenario, runWardenPipeline, DEMO_SCENARIOS } = require('./agents/shopperAgent');
+      const scenario = req.body && req.body.scenario_key;
+      const prompt = req.body && req.body.user_prompt;
+      if (scenario && !Object.prototype.hasOwnProperty.call(DEMO_SCENARIOS, scenario)) {
+        return res.status(400).json({ error: 'unknown scenario_key' });
+      }
+      if (!scenario && (typeof prompt !== 'string' || !prompt.trim())) {
+        return res.status(400).json({ error: 'user_prompt or scenario_key is required' });
+      }
+      if (!scenario && prompt.length > 1000) {
+        return res.status(400).json({ error: 'user_prompt must be at most 1000 characters' });
+      }
+      const result = scenario
+        ? await runDemoScenario(scenario, {
+            execute: true,
+            purchaseDeps: options.purchaseDeps,
+          })
+        : await runWardenPipeline(prompt, {
+            execute: true,
+            purchaseDeps: options.purchaseDeps,
+          });
+      const purchase = result.purchase || { httpStatus: 200, body: result };
+      const pe = (result.evaluated_intent && result.evaluated_intent.policy_evaluation) || {};
+      const evaluated = result.evaluated_intent || {};
+      res.status(purchase.httpStatus || 200).json({
+        ...purchase.body,
+        scenario_key: result.scenario_key,
+        agent_reasoning: result.agent_reasoning,
+        agent_proposal: result.agent_proposal || null,
+        quarantine_extracted: evaluated.quarantine_extracted || null,
+        checkout_verification: evaluated.checkout_verification || null,
+        intent_alignment_pass: evaluated.intent_alignment_pass ?? null,
+        untrusted_raw_html_preview: result.untrusted_raw_html_preview || null,
+        tools_exposed_to_agent: result.tools_exposed_to_agent || null,
+        policy_evaluation: {
+          decision: pe.decision || purchase.body.decision,
+          reason: pe.reason || purchase.body.reason,
+          risk_score: pe.risk_score ?? purchase.body.risk_score ?? null,
+          rules_checked: pe.rules_checked || purchase.body.rules_checked || null,
+        },
+      });
+    } catch (err) {
+      console.error('shop error:', err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  app.post('/api/demo/attack', (req, res) => {
+    if (!demoAllowed('attack')) {
+      return res.status(403).json({ error: 'Demo attack route is disabled' });
+    }
+    const { drift, injection } = req.body || {};
+    if (drift !== undefined && typeof drift !== 'boolean') {
+      return res.status(400).json({ error: 'drift must be a boolean' });
+    }
+    if (injection !== undefined && typeof injection !== 'boolean') {
+      return res.status(400).json({ error: 'injection must be a boolean' });
+    }
+    if (typeof drift !== 'boolean' && typeof injection !== 'boolean') {
+      return res.status(400).json({ error: 'drift must be a boolean' });
+    }
+    res.json({ ok: true, attack_mode: setAttackMode({ drift, injection }) });
+  });
+
+  // Demo-only. Refuses to run in production unless WARDEN_DEMO_TAMPER=1.
+  app.post('/api/demo/tamper', (req, res) => {
+    if (!demoAllowed('tamper')) {
+      return res.status(403).json({ error: 'Demo tamper route is disabled' });
+    }
+    const id = Number(req.body && req.body.id);
+    const amount = Number(req.body && req.body.amount);
+    if (!Number.isInteger(id) || id <= 0 || !Number.isFinite(amount)) {
+      return res.status(400).json({ error: 'id and amount are required' });
+    }
+    const changed = tamperRow(id, amount);
+    if (!changed) return res.status(404).json({ error: 'audit row not found' });
+    res.json({
+      ok: true,
+      warning: 'Demo-only tamper applied. Historical hashes were not updated. Call /api/audit/verify.',
+    });
+  });
+
+  app.post('/api/demo/reset', (req, res) => {
+    if (!demoAllowed('attack')) {
+      return res.status(403).json({ error: 'Demo routes are disabled' });
+    }
+    const { resetPolicyState } = require('./agents/shopperAgent');
+    const { setAttackMode } = require('./catalog/attackStorefront');
+    resetPolicyState();
+    setAttackMode({ drift: false, injection: true });
+    res.json({ ok: true, attack_mode: { drift: false, injection: true } });
+  });
+
+  const frontendDist = path.resolve(__dirname, '../frontend/dist');
+  if (fs.existsSync(path.join(frontendDist, 'index.html'))) {
+    app.use(express.static(frontendDist, { index: false }));
+    app.get(/.*/, (req, res, next) => {
+      if (req.path.startsWith('/api/')) return next();
+      res.sendFile(path.join(frontendDist, 'index.html'));
+    });
   }
-  const chainStatus = verifyAuditChain(memoryAuditLogs);
-  res.json({
-    success: true,
-    tampered: true,
-    logs: memoryAuditLogs,
-    chain_status: chainStatus,
-    counters: computeDashboardCounters(memoryAuditLogs),
+
+  app.use((err, req, res, next) => {
+    if (res.headersSent) return next(err);
+    if (err.type === 'entity.parse.failed') {
+      return res.status(400).json({ error: 'Malformed JSON request body' });
+    }
+    if (err.type === 'entity.too.large') {
+      return res.status(413).json({ error: 'Request body too large' });
+    }
+    console.error(err);
+    res.status(500).json({ error: 'Internal error' });
   });
-});
 
-// POST /api/demo/reset -> Resets audit ledger & counters
-app.post("/api/demo/reset", (req, res) => {
-  memoryAuditLogs = [];
-  resetPolicyState();
-  res.json({
-    success: true,
-    message: "Warden demo state successfully reset.",
-    logs: [],
-    chain_status: verifyAuditChain([]),
-    counters: computeDashboardCounters([]),
+  return app;
+}
+
+const app = createApp();
+
+if (require.main === module) {
+  const port = process.env.PORT || 4000;
+  app.listen(port, () => {
+    console.log(`Warden listening on port ${port}`);
+    console.log(`SQLite database: ${DB_PATH}`);
   });
-});
+}
 
-// GET /api/evidence/:id -> Generates PayPal dispute evidence packet
-app.get("/api/evidence/:id", (req, res) => {
-  const rowId = Number(req.params.id);
-  const row = memoryAuditLogs.find((r) => r.id === rowId);
-  if (!row) {
-    return res.status(404).json({ error: "Audit block not found" });
-  }
-  const packet = generateDisputeEvidencePacket(row);
-  res.json(packet);
-});
-
-app.listen(PORT, () => {
-  console.log(`🛡️ Warden Backend Server running live on http://localhost:${PORT}`);
-});
-
-// GET /api/audit/dispute/:id -> Generates PayPal dispute evidence packet for frontend
-app.get("/api/audit/dispute/:id", (req, res) => {
-  const rowId = Number(req.params.id);
-  const row = memoryAuditLogs.find((r) => r.id === rowId);
-  if (!row) {
-    return res.status(404).json({ error: "Audit block not found" });
-  }
-  const packet = generateDisputeEvidencePacket(row, memoryAuditLogs);
-  res.json(packet);
-});
+module.exports = { app, createApp };

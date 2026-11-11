@@ -73,7 +73,7 @@ async function sanitizeUntrustedProduct(rawProduct, options = {}) {
   const baseline = deterministicSanitizeProduct(rawProduct);
   const apiKey = process.env.LLM_API_KEY || process.env.OPENAI_API_KEY;
 
-  if (!apiKey || options.forceDeterministic) {
+  if (!apiKey || options.forceDeterministic || process.env.NODE_ENV === "test") {
     return baseline;
   }
 
@@ -106,9 +106,11 @@ async function sanitizeUntrustedProduct(rawProduct, options = {}) {
           },
         ],
       }),
+      signal: AbortSignal.timeout(10_000),
     });
 
     if (!response.ok) {
+      console.warn(`Quarantine LLM returned HTTP ${response.status}; using deterministic extraction.`);
       return baseline;
     }
 
@@ -125,6 +127,9 @@ async function sanitizeUntrustedProduct(rawProduct, options = {}) {
       stripped_payload: parsed.stripped_payload || baseline.stripped_payload,
     };
   } catch (err) {
+    console.warn(
+      `Quarantine LLM unavailable (${err.name || "Error"}); using deterministic extraction.`
+    );
     return baseline;
   }
 }
