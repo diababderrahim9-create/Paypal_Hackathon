@@ -2,7 +2,7 @@
 ![Runtime](https://img.shields.io/badge/node-%E2%89%A518-339933?style=flat-square&logo=node.js&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/core%20pipeline-0%20dependencies-0070BA?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-22c55e?style=flat-square)
-![README](https://img.shields.io/badge/README-v1.0-6366f1?style=flat-square)
+![README](https://img.shields.io/badge/README-v1.1-6366f1?style=flat-square)
 
 # Warden
 
@@ -42,49 +42,51 @@ Warden is the missing guard that runs before any payment is attempted.
 
 Every purchase goes through four stages before a verdict is issued:
 
-```
-  AI agent proposes a purchase
-            │
-            ▼
-  ┌──────────────────────┐
-  │ 1. QUARANTINE        │  Clean the product page. Strip any hidden
-  │                      │  instructions. Flag anything suspicious.
-  └──────────────────────┘
-            │
-            ▼
-  ┌──────────────────────┐
-  │ 2. POLICY ENGINE     │  Check the rules: approved merchant?
-  │                      │  Price match? Within budget and velocity?
-  └──────────────────────┘
-            │
-            ▼
-  ┌──────────────────────┐
-  │ 3. AUDIT CHAIN       │  Record the decision in a tamper-proof
-  │                      │  cryptographic log — every single one.
-  └──────────────────────┘
-            │
-            ▼
-  ┌──────────────────────┐
-  │ 4. VERDICT           │   ALLOW  ·  ASK_HUMAN  ·  DENY
-  └──────────────────────┘
+```text
+  AI agent wants to buy something
+              │
+              ▼
+  1  QUARANTINE   clean the page, strip hidden instructions, flag tricks
+              │
+              ▼
+  2  POLICY       check merchant, price, budget and velocity
+              │
+              ▼
+  3  AUDIT        record the verdict in a SHA-256 hash chain
+              │
+              ▼
+  4  VERDICT      ALLOW  ·  ASK_HUMAN  ·  DENY
 ```
 
 ```mermaid
 flowchart TD
     U(["User asks the agent to buy something"]) --> SA["Shopping Agent"]
-    SA -->|"search_products"| STORE["Online store<br/>(untrusted content)"]
-    STORE -->|"raw page text"| Q["Quarantine<br/>cleans &amp; flags tricks"]
+
+    subgraph UNTRUSTED["Untrusted content"]
+        STORE["Online store<br/>product page"]
+    end
+
+    subgraph WARDEN["Warden trust boundary"]
+        Q["1 · Quarantine<br/>clean and flag"]
+        P{"2 · Policy engine<br/>ALLOW / ASK_HUMAN / DENY"}
+        A["3 · Audit chain<br/>SHA-256 hash-linked"]
+    end
+
+    SA -->|"search_products"| STORE
+    STORE -->|"raw page text"| Q
     Q -->|"safe structured data"| SA
-    SA -->|"propose_purchase"| P{"Warden policy engine"}
+    SA -->|"propose_purchase"| P
+    P -->|"record every verdict"| A
 
-    P --> AUDIT["Audit log<br/>every decision recorded"]
+    P -->|"ALLOW"| OK(["Approved"])
+    P -->|"ASK_HUMAN"| HUMAN(["Waits for a human"])
+    P -->|"DENY"| BLOCK(["Blocked"])
 
-    P -->|"ALLOW"| OK["Approved<br/>ready to pay"]
-    P -->|"ASK_HUMAN"| HUMAN["Waits for human approval"]
-    P -->|"DENY"| BLOCK["Blocked<br/>no payment made"]
-
+    style UNTRUSTED fill:#fef2f2,stroke:#ef4444
+    style WARDEN fill:#eff6ff,stroke:#003087
     style P fill:#003087,color:#fff
-    style AUDIT fill:#0070BA,color:#fff
+    style Q fill:#0070BA,color:#fff
+    style A fill:#0070BA,color:#fff
     style OK fill:#22c55e,color:#fff
     style HUMAN fill:#f59e0b,color:#fff
     style BLOCK fill:#ef4444,color:#fff
@@ -269,9 +271,15 @@ Paypal_Hackathon/
 └── README.md
 ```
 
-
 ## License
 
 [MIT](LICENSE)
+
+---
+
+## README changelog
+
+- **v1.1** — Cleaned up the ASCII pipeline and Mermaid architecture diagrams; fixed alignment and label text.
+- **v1.0** — Final hackathon submission version. Full project overview, verified demo output, PayPal integration design, and roadmap.
 
 
