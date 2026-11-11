@@ -269,20 +269,9 @@ Paypal_Hackathon/
 └── README.md
 ```
 
----
-
-## Team
-
-Built for the PayPal + AI Hackathon 2026. Thanks to the PayPal team and organizers for the opportunity to think seriously about what it means to let AI agents spend money.
-
----
 
 ## License
 
 [MIT](LICENSE)
 
----
 
-## README changelog
-
-- **v1.0** — Final hackathon submission version. Full project overview, verified demo output, PayPal integration design, and roadmap.
