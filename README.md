@@ -6,7 +6,7 @@
 
 <div align="center">
 
-<img src="warden_logo.jpg" alt="Warden Logo" width="280" />
+<img src="assets/warden_logo.jpg" alt="Warden Logo" width="280" />
 
 # Warden
 
@@ -49,14 +49,14 @@ Warden is the missing guard that runs before any payment is attempted.
 <div align="center">
 
 ### Security Command Center — Overview Dashboard
-<img src="overview_dashboard.jpg" alt="Warden Overview Dashboard" width="900" />
+<img src="assets/overview_dashboard.jpg" alt="Warden Overview Dashboard" width="900" />
 
 *Real-time autonomous governance dashboard displaying active guardrails, protected spend volume, zero-trust pipeline milestones, and live intercept telemetry.*
 
 <br/>
 
 ### Transaction Audit Ledger
-<img src="audit_ledger.jpg" alt="Warden Transaction Audit Ledger" width="900" />
+<img src="assets/audit_ledger.jpg" alt="Warden Transaction Audit Ledger" width="900" />
 
 *Immutable SQLite audit trail with SHA-256 hash chaining, instant tamper detection, and PayPal dispute forensic evidence export.*
 
