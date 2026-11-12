@@ -1,8 +1,8 @@
 # Secrets and environment files
 .env
 .env.*
-**/.env
-**/.env.*
+/.env
+/.env.*
 *.pem
 *.key
 *secret*
@@ -18,9 +18,9 @@ npm-debug.log*
 
 # Dependencies and build artifacts
 node_modules/
-**/node_modules/
+/node_modules/
 dist/
-**/dist/
+/dist/
 build/
 .DS_Store
 Thumbs.db

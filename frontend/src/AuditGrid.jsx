@@ -1,3 +1,4 @@
+import React from 'react';
 import {
   ClientSideRowModelModule,
   ModuleRegistry,
@@ -20,19 +21,19 @@ ModuleRegistry.registerModules([
 ]);
 
 const gridTheme = themeQuartz.withParams({
-  backgroundColor: '#0f151d',
-  foregroundColor: '#c4ced8',
-  headerBackgroundColor: '#121b25',
-  headerTextColor: '#77889b',
-  borderColor: '#202b38',
-  rowHoverColor: '#151f2a',
-  selectedRowBackgroundColor: '#162a2b',
-  oddRowBackgroundColor: '#0f151d',
-  fontFamily: 'Inter, ui-sans-serif, system-ui, sans-serif',
+  backgroundColor: '#101722',
+  foregroundColor: '#EBE8E0',
+  headerBackgroundColor: '#121A24',
+  headerTextColor: '#8FA3B0',
+  borderColor: '#1E2631',
+  rowHoverColor: '#162230',
+  selectedRowBackgroundColor: '#1C293A',
+  oddRowBackgroundColor: '#0D131C',
+  fontFamily: 'Inter, -apple-system, sans-serif',
   fontSize: 12,
-  headerFontSize: 10,
-  rowHeight: 48,
-  headerHeight: 42,
+  headerFontSize: 11,
+  rowHeight: 46,
+  headerHeight: 40,
 });
 
 const money = (value) =>
@@ -41,73 +42,95 @@ const money = (value) =>
     : '—';
 const dateTime = (value) => (value ? new Date(value).toLocaleString() : '—');
 
-function Badge({ children, tone = 'neutral', dot = false }) {
+function DecisionBadge({ decision }) {
+  const isAllow = decision === 'ALLOW';
+  const isHuman = decision === 'ASK_HUMAN';
+  const isDeny = decision === 'DENY';
+
   return (
-    <span className={`badge badge-${tone}`}>
-      {dot && <span className="badge-dot" />}
-      {children}
+    <span
+      className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
+        isAllow
+          ? 'bg-[#10B981]/20 text-[#10B981]'
+          : isHuman
+          ? 'bg-[#F59E0B]/20 text-[#F59E0B]'
+          : isDeny
+          ? 'bg-[#EF4444]/20 text-[#EF4444]'
+          : 'bg-[#1E2631] text-[#8FA3B0]'
+      }`}
+    >
+      {decision || 'PENDING'}
     </span>
   );
 }
 
-function DecisionBadge({ decision }) {
-  const tone = decision === 'ALLOW' ? 'mint' : decision === 'ASK_HUMAN' ? 'amber' : 'red';
-  return <Badge tone={tone} dot>{decision || 'PENDING'}</Badge>;
-}
-
 export default function AuditGrid({ rowData, columnDefs, quickFilterText, onRowSelected }) {
   const columns = [
-    { field: 'id', headerName: 'ID', width: 76, pinned: 'left', filter: 'agNumberColumnFilter' },
-    { field: 'timestamp', headerName: 'Timestamp', minWidth: 168, valueFormatter: (p) => dateTime(p.value) },
-    { field: 'request_summary', headerName: 'Request summary', minWidth: 210, flex: 1.1 },
-    { field: 'merchant', headerName: 'Merchant', minWidth: 145 },
-    { field: 'quoted_amount', headerName: 'Quoted', width: 108, valueFormatter: (p) => money(p.value), filter: 'agNumberColumnFilter' },
-    { field: 'checkout_amount', headerName: 'Checkout', width: 112, valueFormatter: (p) => money(p.value), filter: 'agNumberColumnFilter' },
+    { field: 'id', headerName: 'ID', width: 70, pinned: 'left', filter: 'agNumberColumnFilter' },
+    { field: 'timestamp', headerName: 'Timestamp', minWidth: 160, valueFormatter: (p) => dateTime(p.value) },
+    { field: 'request_summary', headerName: 'Request Summary', minWidth: 200, flex: 1.2 },
+    { field: 'merchant', headerName: 'Merchant', minWidth: 135 },
+    { field: 'quoted_amount', headerName: 'Quoted', width: 95, valueFormatter: (p) => money(p.value), filter: 'agNumberColumnFilter' },
+    { field: 'checkout_amount', headerName: 'Checkout', width: 100, valueFormatter: (p) => money(p.value), filter: 'agNumberColumnFilter' },
     {
       field: 'decision',
       headerName: 'Decision',
-      width: 126,
+      width: 120,
       cellRenderer: (p) => <DecisionBadge decision={p.value} />,
     },
-    { field: 'reason', headerName: 'Policy reason', minWidth: 240, flex: 1.2 },
-    { field: 'risk_score', headerName: 'Risk', width: 84, filter: 'agNumberColumnFilter' },
-    { field: 'paypal_order_id', headerName: 'PayPal order', minWidth: 145 },
+    { field: 'reason', headerName: 'Policy Reason', minWidth: 220, flex: 1.4 },
+    { field: 'risk_score', headerName: 'Risk', width: 80, filter: 'agNumberColumnFilter' },
+    { field: 'paypal_order_id', headerName: 'PayPal Order', minWidth: 140 },
     {
       field: 'payment_status',
-      headerName: 'Payment status',
-      minWidth: 170,
+      headerName: 'Payment Status',
+      minWidth: 150,
       cellRenderer: (p) => {
-        const tone = p.value === 'CAPTURED'
-          ? 'mint'
-          : p.value === 'BLOCKED' || p.value === 'REJECTED'
-            ? 'red'
-            : p.value?.includes('APPROVAL')
-              ? 'amber'
-              : 'neutral';
-        return <Badge tone={tone}>{p.value || '—'}</Badge>;
+        const isCaptured = p.value === 'CAPTURED';
+        const isBlocked = p.value === 'BLOCKED' || p.value === 'REJECTED';
+        const isPending = p.value?.includes('APPROVAL');
+        return (
+          <span
+            className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
+              isCaptured
+                ? 'bg-[#10B981]/20 text-[#10B981]'
+                : isBlocked
+                ? 'bg-[#EF4444]/20 text-[#EF4444]'
+                : isPending
+                ? 'bg-[#F59E0B]/20 text-[#F59E0B]'
+                : 'bg-[#1E2631] text-[#8FA3B0]'
+            }`}
+          >
+            {p.value || '—'}
+          </span>
+        );
       },
     },
-    { field: 'prev_hash', headerName: 'Previous hash', minWidth: 150, valueFormatter: (p) => p.value ? `${p.value.slice(0, 12)}…` : '—' },
-    { field: 'entry_hash', headerName: 'Entry hash', minWidth: 150, valueFormatter: (p) => p.value ? `${p.value.slice(0, 12)}…` : '—' },
+    {
+      field: 'entry_hash',
+      headerName: 'SHA-256 Seal',
+      minWidth: 140,
+      valueFormatter: (p) => (p.value ? `${p.value.slice(0, 10)}…` : '—'),
+    },
   ];
 
   return (
-    <div className="ag-theme-warden ledger-grid">
+    <div className="ag-theme-warden w-full h-[460px]">
       <AgGridReact
         theme={gridTheme}
         rowData={rowData}
         columnDefs={columnDefs || columns}
-        defaultColDef={{ sortable: true, resizable: true, filter: true, floatingFilter: false }}
+        defaultColDef={{ sortable: true, resizable: true, filter: true }}
         quickFilterText={quickFilterText}
         rowSelection={{ mode: 'singleRow', checkboxes: false, enableClickSelection: true }}
         onRowClicked={(event) => onRowSelected(event.data)}
         getRowId={(params) => String(params.data.id)}
         pagination
-        paginationPageSize={8}
+        paginationPageSize={10}
         paginationPageSizeSelector={false}
         suppressCellFocus
         animateRows={false}
-        overlayNoRowsTemplate="<span class='grid-empty'>No audit entries match these filters.</span>"
+        overlayNoRowsTemplate="<span class='text-xs font-mono text-[#8FA3B0]'>No audit entries found.</span>"
       />
     </div>
   );
