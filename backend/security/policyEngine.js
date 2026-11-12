@@ -1,276 +1,407 @@
 /**
- * GUY 1 -> GUY 2: Deterministic Policy Engine
+ * GUY 1 (BYCER) -> GUY 2: Dynamic Human-Controlled Deterministic Policy Engine
  * "The LLM proposes. Deterministic code disposes."
- * Pure, synchronous, deterministic rule-based evaluation. Zero I/O.
- * The only decisions are ALLOW, ASK_HUMAN, and DENY. Anything else fails closed.
+ * Pure, synchronous, deterministic rule-based evaluation with dynamic human budget bounds.
  */
 
-const DECISIONS = Object.freeze(["ALLOW", "ASK_HUMAN", "DENY"]);
+const SYSTEM_SAFETY_CEILING = 1000.00; // Absolute upper bound safety guardrail
 
-const POLICY_RULES = Object.freeze({
-  AUTO_APPROVE_LIMIT: 50.0,
-  HARD_TRANSACTION_CAP: 150.0,
-  DAILY_BUDGET_CAP: 300.0,
-  MAX_TX_PER_MINUTE: 3,
-  ALLOWED_MERCHANTS: Object.freeze(["merch_technova", "merch_cyberdock", "merch_shadydeals"]),
+const DEFAULT_POLICY_LIMITS = {
+  autoApproveLimit: Number(process.env.AUTO_APPROVE_LIMIT || 50.00),
+  hardTransactionCap: Number(process.env.HARD_TRANSACTION_CAP || 150.00),
+  dailyBudgetCap: Number(process.env.DAILY_BUDGET_CAP || 300.00),
+  maxTxPerMinute: 3,
+  allowedMerchants: [
+    "merch_technova",
+    "merch_cyberdock",
+    "merch_shadydeals",
+  ],
+};
+
+let humanPolicyLimits = {
+  autoApproveLimit: DEFAULT_POLICY_LIMITS.autoApproveLimit,
+  hardTransactionCap: DEFAULT_POLICY_LIMITS.hardTransactionCap,
+  dailyBudgetCap: DEFAULT_POLICY_LIMITS.dailyBudgetCap,
+  maxTxPerMinute: DEFAULT_POLICY_LIMITS.maxTxPerMinute,
+  allowedMerchants: [...DEFAULT_POLICY_LIMITS.allowedMerchants],
+};
+
+let isHumanLimitOverridden = false;
+
+let spendTracker = {
+  dailySpentUSD: 0.00,
+  recentTransactionTimestamps: [],
+};
+
+const POLICY_RULES = {};
+Object.defineProperties(POLICY_RULES, {
+  autoApproveLimit: {
+    get: () => humanPolicyLimits.autoApproveLimit,
+    enumerable: true,
+  },
+  hardTransactionCap: {
+    get: () => humanPolicyLimits.hardTransactionCap,
+    enumerable: true,
+  },
+  dailyBudgetCap: {
+    get: () => humanPolicyLimits.dailyBudgetCap,
+    enumerable: true,
+  },
+  maxTxPerMinute: {
+    get: () => humanPolicyLimits.maxTxPerMinute,
+    enumerable: true,
+  },
+  MAX_TX_PER_MINUTE: {
+    get: () => humanPolicyLimits.maxTxPerMinute,
+    enumerable: true,
+  },
+  allowedMerchants: {
+    get: () => [...humanPolicyLimits.allowedMerchants],
+    enumerable: true,
+  },
 });
 
-// In-memory spend ledger for the offline shopper demo only.
-// The HTTP path passes policy_context from the database and never reads this.
-let memoryLedger = { dailySpent: 0, timestamps: [] };
-
-function resetPolicyState() {
-  memoryLedger = { dailySpent: 0, timestamps: [] };
-  return { dailySpent: 0, txLastMinute: 0 };
+function normalizeNumber(value, fallback = 0) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : fallback;
 }
 
-function recordSuccessfulSpend(amount) {
-  const n = Number(amount);
-  if (!Number.isFinite(n) || n <= 0) return { ...memoryLedger };
-  const now = Date.now();
-  memoryLedger.dailySpent += n;
-  memoryLedger.timestamps.push(now);
-  memoryLedger.timestamps = memoryLedger.timestamps.filter((t) => now - t < 60_000);
-  return { dailySpent: memoryLedger.dailySpent, txLastMinute: memoryLedger.timestamps.length };
+function clampLimit(value, min, max, fallback) {
+  const safe = normalizeNumber(value, fallback);
+  return Math.min(Math.max(safe, min), max);
 }
 
-function getInMemoryContext() {
-  const now = Date.now();
-  memoryLedger.timestamps = memoryLedger.timestamps.filter((t) => now - t < 60_000);
-  return {
-    daily_spent: memoryLedger.dailySpent,
-    tx_last_minute: memoryLedger.timestamps.length,
-  };
-}
+function setPolicyLimits(newLimits = {}) {
+  const nextHumanLimits = { ...humanPolicyLimits };
+  const source = newLimits && typeof newLimits === 'object' ? newLimits : {};
 
-function cents(value) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return null;
-  return Math.round(n * 100);
-}
+  let dailyCap =
+    source.dailyBudgetCap !== undefined ? Number(source.dailyBudgetCap) : nextHumanLimits.dailyBudgetCap;
+  let hardCap =
+    source.hardTransactionCap !== undefined ? Number(source.hardTransactionCap) : nextHumanLimits.hardTransactionCap;
+  let autoLimit =
+    source.autoApproveLimit !== undefined ? Number(source.autoApproveLimit) : nextHumanLimits.autoApproveLimit;
+  let maxTx =
+    source.maxTxPerMinute !== undefined ? Number(source.maxTxPerMinute) : nextHumanLimits.maxTxPerMinute;
 
-function money(c) {
-  return (c / 100).toFixed(2);
-}
+  dailyCap = clampLimit(dailyCap, 1, SYSTEM_SAFETY_CEILING, 300);
+  hardCap = clampLimit(hardCap, 1, dailyCap, 150);
+  autoLimit = clampLimit(autoLimit, 0, hardCap, 50);
+  maxTx = clampLimit(maxTx, 1, 100, DEFAULT_POLICY_LIMITS.maxTxPerMinute);
 
-function limitsFrom(intent) {
-  const cfg = (intent && intent.policy_config) || {};
-  const merchants = Array.isArray(cfg.allowedMerchants)
-    ? cfg.allowedMerchants
-        .map(String)
-        .filter((merchant) => POLICY_RULES.ALLOWED_MERCHANTS.includes(merchant))
-    : POLICY_RULES.ALLOWED_MERCHANTS;
-  const configuredAuto = cents(
-    cfg.autoApproveLimit !== undefined ? cfg.autoApproveLimit : POLICY_RULES.AUTO_APPROVE_LIMIT
-  );
-  const configuredHard = cents(
-    cfg.hardTransactionCap !== undefined ? cfg.hardTransactionCap : POLICY_RULES.HARD_TRANSACTION_CAP
-  );
-  return {
-    auto: configuredAuto === null
-      ? cents(POLICY_RULES.AUTO_APPROVE_LIMIT)
-      : Math.min(configuredAuto, cents(POLICY_RULES.AUTO_APPROVE_LIMIT)),
-    hard: configuredHard === null
-      ? cents(POLICY_RULES.HARD_TRANSACTION_CAP)
-      : Math.min(configuredHard, cents(POLICY_RULES.HARD_TRANSACTION_CAP)),
-    daily: Math.min(
-      cents(cfg.dailyBudgetCap !== undefined ? cfg.dailyBudgetCap : POLICY_RULES.DAILY_BUDGET_CAP) ??
-        cents(POLICY_RULES.DAILY_BUDGET_CAP),
-      cents(POLICY_RULES.DAILY_BUDGET_CAP)
-    ),
-    velocity: Number.isFinite(Number(cfg.maxTxPerMinute)) && Number(cfg.maxTxPerMinute) > 0
-      ? Math.min(Number(cfg.maxTxPerMinute), POLICY_RULES.MAX_TX_PER_MINUTE)
-      : POLICY_RULES.MAX_TX_PER_MINUTE,
-    merchants,
-  };
-}
-
-function closedDeny(reason, rules) {
-  return {
-    decision: "DENY",
-    risk_score: 100,
-    rules_checked: rules,
-    reason,
-  };
-}
-
-/**
- * Evaluates a purchase intent against deterministic rules.
- * Ignores any decision proposed by an LLM.
- * @param {Object} intent
- * @returns {{ decision: "ALLOW"|"ASK_HUMAN"|"DENY", risk_score: number, rules_checked: Object, reason: string }}
- */
-function evaluate(intent) {
-  const emptyRules = {
-    quarantine_clean: false,
-    intent_alignment: false,
-    merchant_allowlist: false,
-    merchant_binding: false,
-    price_drift_pass: false,
-    hard_cap_pass: false,
-    budget_cap_pass: false,
-    daily_budget_pass: false,
-    velocity_pass: false,
+  humanPolicyLimits = {
+    ...humanPolicyLimits,
+    autoApproveLimit: Number(autoLimit.toFixed(2)),
+    hardTransactionCap: Number(hardCap.toFixed(2)),
+    dailyBudgetCap: Number(dailyCap.toFixed(2)),
+    maxTxPerMinute: Number(maxTx.toFixed(0)),
+    allowedMerchants: Array.isArray(source.allowedMerchants)
+      ? [...source.allowedMerchants]
+      : [...humanPolicyLimits.allowedMerchants],
   };
 
-  if (!intent || typeof intent !== "object") {
-    return closedDeny("Policy Engine received no purchase intent", emptyRules);
+  isHumanLimitOverridden = true;
+  return getPolicyLimits();
+}
+
+function extractPromptAutoApproveLimit(userPrompt = "") {
+  if (isHumanLimitOverridden) {
+    return humanPolicyLimits.autoApproveLimit;
   }
 
-  const q = intent.quarantine_extracted || {};
-  const c = intent.checkout_verification || {};
-  const ctx = intent.policy_context || {};
-  const limits = limitsFrom(intent);
-  const contextPresent =
-    Object.prototype.hasOwnProperty.call(intent, "policy_context") &&
-    ctx.daily_spent !== undefined &&
-    ctx.tx_last_minute !== undefined;
+  const text = String(userPrompt || "");
+  const match = text.match(
+    /(?:under|below|max|limit|up\s+to|budget(?:\s+of)?)\s*\$\s*(\d+(?:\.\d{1,2})?)/i
+  );
 
-  const quotedCents = cents(q.quoted_price);
-  const liveCents = cents(c.live_checkout_price);
-  const quotedMerchant = String(q.merchant_id || "");
-  const liveMerchant = c.merchant_id ? String(c.merchant_id) : "";
-  const merchantForList = liveMerchant || quotedMerchant;
-  const quotedCurrency = q.currency ? String(q.currency).toUpperCase() : "";
-  const liveCurrency = c.currency ? String(c.currency).toUpperCase() : "";
+  if (match && match[1]) {
+    const parsed = Number(match[1]);
+    if (!Number.isNaN(parsed) && parsed >= 0) {
+      return Math.min(parsed, humanPolicyLimits.hardTransactionCap);
+    }
+  }
 
+  return humanPolicyLimits.autoApproveLimit;
+}
+
+function getPolicyLimits() {
+  return {
+    ...humanPolicyLimits,
+    isHumanLimitOverridden,
+    systemSafetyCeiling: SYSTEM_SAFETY_CEILING,
+    dailySpentUSD: Number(spendTracker.dailySpentUSD.toFixed(2)),
+    remainingDailyBudgetUSD: Number(
+      Math.max(0, humanPolicyLimits.dailyBudgetCap - spendTracker.dailySpentUSD).toFixed(2)
+    ),
+    MAX_TX_PER_MINUTE: humanPolicyLimits.maxTxPerMinute,
+  };
+}
+
+function resetPolicyState() {
+  humanPolicyLimits = {
+    autoApproveLimit: DEFAULT_POLICY_LIMITS.autoApproveLimit,
+    hardTransactionCap: DEFAULT_POLICY_LIMITS.hardTransactionCap,
+    dailyBudgetCap: DEFAULT_POLICY_LIMITS.dailyBudgetCap,
+    maxTxPerMinute: DEFAULT_POLICY_LIMITS.maxTxPerMinute,
+    allowedMerchants: [...DEFAULT_POLICY_LIMITS.allowedMerchants],
+  };
+  isHumanLimitOverridden = false;
+  spendTracker = {
+    dailySpentUSD: 0.00,
+    recentTransactionTimestamps: [],
+  };
+  return getPolicyLimits();
+}
+
+function recordSuccessfulSpend(amountUSD) {
+  const amt = normalizeNumber(amountUSD, 0);
+  if (amt > 0) {
+    spendTracker.dailySpentUSD = Number((spendTracker.dailySpentUSD + amt).toFixed(2));
+    spendTracker.recentTransactionTimestamps.push(Date.now());
+  }
+  return getPolicyLimits();
+}
+
+function invalidPolicyResult(reason, extra = {}) {
+  return {
+    decision: 'DENY',
+    risk_score: 100,
+    rules_checked: {
+      quarantine_clean: false,
+      quarantine_clean_pass: false,
+      merchant_allowlist: false,
+      merchant_allowlist_pass: false,
+      price_drift_pass: false,
+      per_tx_upper_bound_pass: false,
+      daily_budget_upper_bound_pass: false,
+      budget_cap_pass: false,
+      intent_alignment_pass: false,
+      velocity_pass: false,
+    },
+    reason,
+    applied_limits: {
+      autoApproveLimit: humanPolicyLimits.autoApproveLimit,
+      hardTransactionCap: humanPolicyLimits.hardTransactionCap,
+      dailyBudgetCap: humanPolicyLimits.dailyBudgetCap,
+    },
+    ...extra,
+  };
+}
+
+function evaluate(intent, overrideLimits = {}) {
+  if (!intent || typeof intent !== 'object') {
+    return invalidPolicyResult('Policy request missing or invalid');
+  }
+
+  const safeIntent = intent;
+  const q =
+    safeIntent.quarantine_extracted && typeof safeIntent.quarantine_extracted === 'object'
+      ? safeIntent.quarantine_extracted
+      : {};
+  const c =
+    safeIntent.checkout_verification && typeof safeIntent.checkout_verification === 'object'
+      ? safeIntent.checkout_verification
+      : {};
+  const policyContext =
+    safeIntent.policy_context && typeof safeIntent.policy_context === 'object'
+      ? safeIntent.policy_context
+      : null;
+
+  if (!policyContext) {
+    return invalidPolicyResult('Policy context missing; purchase denied');
+  }
+
+  const hasLiveCheckoutPrice =
+    c && Object.prototype.hasOwnProperty.call(c, 'live_checkout_price') &&
+    c.live_checkout_price !== null &&
+    c.live_checkout_price !== undefined &&
+    c.live_checkout_price !== '' &&
+    !Number.isNaN(Number(c.live_checkout_price));
+
+  if (!hasLiveCheckoutPrice) {
+    return invalidPolicyResult('Checkout verification missing live price; purchase denied');
+  }
+
+  const overrideConfig = overrideLimits && typeof overrideLimits === 'object' ? overrideLimits : {};
+  const activeLimits = {
+    ...humanPolicyLimits,
+  };
+
+  if (overrideConfig.hardTransactionCap !== undefined) {
+    const hardCap = Number(overrideConfig.hardTransactionCap);
+    if (!Number.isNaN(hardCap)) {
+      activeLimits.hardTransactionCap = Math.min(hardCap, humanPolicyLimits.hardTransactionCap);
+    }
+  }
+
+  if (overrideConfig.dailyBudgetCap !== undefined) {
+    const dailyCap = Number(overrideConfig.dailyBudgetCap);
+    if (!Number.isNaN(dailyCap)) {
+      activeLimits.dailyBudgetCap = Math.min(dailyCap, humanPolicyLimits.dailyBudgetCap);
+    }
+  }
+
+  if (overrideConfig.autoApproveLimit !== undefined) {
+    const autoLimit = Number(overrideConfig.autoApproveLimit);
+    if (!Number.isNaN(autoLimit)) {
+      activeLimits.autoApproveLimit = Math.min(autoLimit, humanPolicyLimits.autoApproveLimit);
+    }
+  }
+
+  if (overrideConfig.maxTxPerMinute !== undefined) {
+    const maxTx = Number(overrideConfig.maxTxPerMinute);
+    if (!Number.isNaN(maxTx)) {
+      activeLimits.maxTxPerMinute = Math.min(maxTx, humanPolicyLimits.maxTxPerMinute);
+    }
+  }
+
+  if (Array.isArray(overrideConfig.allowedMerchants)) {
+    const intersection = overrideConfig.allowedMerchants.filter((merchant) =>
+      humanPolicyLimits.allowedMerchants.includes(String(merchant))
+    );
+    if (intersection.length > 0) {
+      activeLimits.allowedMerchants = [...intersection];
+    }
+  }
+
+  if (isHumanLimitOverridden) {
+    activeLimits.autoApproveLimit = humanPolicyLimits.autoApproveLimit;
+    activeLimits.hardTransactionCap = humanPolicyLimits.hardTransactionCap;
+    activeLimits.dailyBudgetCap = humanPolicyLimits.dailyBudgetCap;
+    activeLimits.maxTxPerMinute = humanPolicyLimits.maxTxPerMinute;
+  }
+
+  const quotedPrice = Number(q.quoted_price ?? 0);
+  const livePrice = Number(c.live_checkout_price);
+  const merchantId = String(q.merchant_id || c.merchant_id || "");
   const injectionDetected = Boolean(q.injection_detected);
-  const currencyValid =
-    /^[A-Z]{3}$/.test(quotedCurrency) &&
-    /^[A-Z]{3}$/.test(liveCurrency) &&
-    quotedCurrency === liveCurrency;
-  const priceMismatch =
-    quotedCents === null || liveCents === null || quotedCents !== liveCents || !currencyValid;
-  const currencyMismatch = !currencyValid;
-  const priceDriftDetected = Boolean(c.price_drift_detected) || priceMismatch || currencyMismatch;
-  const alignmentPass = intent.intent_alignment_pass !== false && ctx.intent_alignment_pass !== false;
-  const bindingPass = Boolean(quotedMerchant && liveMerchant && liveMerchant === quotedMerchant);
-  const merchantPass = limits.merchants.includes(merchantForList);
-  const hardCapPass = liveCents !== null && liveCents > 0 && liveCents <= limits.hard;
+  const priceDriftDetected = Boolean(c.price_drift_detected || livePrice !== quotedPrice);
+  const dailySpent = normalizeNumber(policyContext.daily_spent, 0);
+  const txLastMinute = normalizeNumber(policyContext.tx_last_minute, 0);
 
-  const dailySpent = cents(ctx.daily_spent === undefined ? 0 : ctx.daily_spent);
-  const projected = (liveCents || 0) + dailySpent;
-  const dailyPass =
-    contextPresent &&
-    dailySpent !== null &&
-    dailySpent >= 0 &&
-    liveCents !== null &&
-    projected <= limits.daily;
-  const recent = Number(ctx.tx_last_minute === undefined ? 0 : ctx.tx_last_minute);
-  const velocityPass =
-    contextPresent && Number.isFinite(recent) && recent >= 0 && recent < limits.velocity;
+  const quarantineCleanPass = !injectionDetected;
+  const merchantAllowlistPass = activeLimits.allowedMerchants.includes(merchantId);
+  const priceDriftPass = !priceDriftDetected;
+  const perTxUpperBoundPass = livePrice > 0 && livePrice <= activeLimits.hardTransactionCap;
+  const dailyUpperBoundPass = dailySpent + livePrice <= activeLimits.dailyBudgetCap;
+  const velocityPass = txLastMinute < activeLimits.maxTxPerMinute;
+  const budgetCapPass = perTxUpperBoundPass && dailyUpperBoundPass;
+  const intentAlignmentPass =
+    safeIntent.intent_alignment_pass !== undefined
+      ? Boolean(safeIntent.intent_alignment_pass)
+      : quarantineCleanPass;
 
   const rules_checked = {
-    quarantine_clean: !injectionDetected,
-    intent_alignment: alignmentPass,
-    merchant_allowlist: merchantPass,
-    merchant_binding: bindingPass,
-    checkout_verification_pass: !priceMismatch && bindingPass,
-    price_drift_pass: !priceDriftDetected,
-    hard_cap_pass: hardCapPass,
-    // Historical name used by earlier callers for the per-transaction cap.
-    budget_cap_pass: hardCapPass,
-    daily_budget_pass: dailyPass,
+    quarantine_clean: quarantineCleanPass,
+    quarantine_clean_pass: quarantineCleanPass,
+    merchant_allowlist: merchantAllowlistPass,
+    merchant_allowlist_pass: merchantAllowlistPass,
+    price_drift_pass: priceDriftPass,
+    per_tx_upper_bound_pass: perTxUpperBoundPass,
+    daily_budget_upper_bound_pass: dailyUpperBoundPass,
+    budget_cap_pass: budgetCapPass,
+    intent_alignment_pass: intentAlignmentPass,
     velocity_pass: velocityPass,
   };
 
   const violations = [];
   let risk_score = 5;
 
-  if (injectionDetected) {
+  if (!quarantineCleanPass) {
     risk_score += 90;
     violations.push(
-      `Prompt Injection detected in untrusted product page (${q.stripped_payload || "SYSTEM OVERRIDE detected"})`
+      `Prompt Injection detected in untrusted product page (${q.stripped_payload || 'SYSTEM OVERRIDE detected'})`
     );
   }
-  if (!alignmentPass) {
+  if (!intentAlignmentPass) {
     risk_score += 85;
-    violations.push("Purchase intent does not match the user's request");
+    violations.push('Proposed purchase does not match original user request intent');
   }
-  if (!bindingPass) {
+  if (!merchantAllowlistPass) {
+    risk_score += 90;
+    violations.push(`Merchant '${merchantId}' is NOT in the verified allowlist`);
+  }
+  if (!priceDriftPass) {
     risk_score += 90;
     violations.push(
-      `Quoted merchant '${quotedMerchant}' does not match the live checkout merchant '${liveMerchant}'`
+      `TOCTOU Price-Drift Attack blocked: Quoted $${quotedPrice.toFixed(2)} != Checkout $${livePrice.toFixed(2)}`
     );
   }
-  if (!merchantPass) {
-    risk_score += 90;
-    violations.push(`Merchant '${merchantForList}' is NOT in the verified allowlist`);
-  }
-  if (priceDriftDetected) {
-    risk_score += 90;
-    const quotedLabel = quotedCents === null ? "invalid" : money(quotedCents);
-    const liveLabel = liveCents === null ? "invalid" : money(liveCents);
-    violations.push(
-      `TOCTOU Price-Drift Attack blocked: Quoted $${quotedLabel} != Checkout $${liveLabel}`
-    );
-  }
-  if (!hardCapPass) {
+  if (!perTxUpperBoundPass) {
     risk_score += 75;
-    const liveLabel = liveCents === null ? "invalid" : money(liveCents);
     violations.push(
-      `Amount $${liveLabel} exceeds hard per-transaction cap of $${money(limits.hard)}`
+      `Amount $${livePrice.toFixed(2)} exceeds human-configured upper bound of $${activeLimits.hardTransactionCap.toFixed(2)} per transaction`
     );
   }
-  if (!dailyPass) {
+  if (!dailyUpperBoundPass) {
     risk_score += 70;
     violations.push(
-      `Daily spending limit exceeded: projected $${money(projected)} exceeds $${money(limits.daily)}`
+      `Amount $${livePrice.toFixed(2)} would exceed daily budget upper bound of $${activeLimits.dailyBudgetCap.toFixed(2)} (Already spent: $${dailySpent.toFixed(2)})`
     );
   }
   if (!velocityPass) {
-    risk_score += 65;
+    risk_score += 60;
     violations.push(
-      `Velocity limit exceeded: ${recent} purchases in the last minute (max ${limits.velocity})`
+      `Velocity limit exceeded: ${txLastMinute} transactions in the last minute exceeds max ${activeLimits.maxTxPerMinute}`
     );
   }
 
-  if (violations.length === 0 && liveCents > limits.auto) {
+  if (violations.length === 0 && livePrice > activeLimits.autoApproveLimit) {
     risk_score = 35;
   }
-  risk_score = Math.min(100, Math.max(0, risk_score));
 
-  let decision = "ALLOW";
-  let reason = "All deterministic security gates passed.";
+  risk_score = Math.min(100, risk_score);
+
+  let decision = 'ALLOW';
+  let reason = `All deterministic security gates passed (<= $${activeLimits.autoApproveLimit.toFixed(2)} auto-approve limit, <= $${activeLimits.hardTransactionCap.toFixed(2)} upper bound).`;
 
   if (violations.length > 0) {
-    decision = "DENY";
-    reason = violations.join(" | ");
-  } else if (liveCents > limits.auto) {
-    decision = "ASK_HUMAN";
-    reason = `Amount $${money(liveCents)} exceeds autonomous threshold ($${money(limits.auto)}). Human payer approval required.`;
+    decision = 'DENY';
+    reason = violations.join(' | ');
+  } else if (livePrice > activeLimits.autoApproveLimit) {
+    decision = 'ASK_HUMAN';
+    reason = `Amount $${livePrice.toFixed(2)} exceeds human-set auto-approve limit ($${activeLimits.autoApproveLimit.toFixed(2)}) but is within upper bound ($${activeLimits.hardTransactionCap.toFixed(2)}). Human payer approval required.`;
   }
 
-  if (!DECISIONS.includes(decision)) {
-    return closedDeny("Policy Engine produced an invalid decision", rules_checked);
-  }
-
-  return { decision, risk_score, rules_checked, reason };
+  return {
+    decision,
+    risk_score,
+    rules_checked,
+    reason,
+    applied_limits: {
+      autoApproveLimit: activeLimits.autoApproveLimit,
+      hardTransactionCap: activeLimits.hardTransactionCap,
+      dailyBudgetCap: activeLimits.dailyBudgetCap,
+    },
+  };
 }
 
-function evaluatePurchaseIntent(intent, policyConfig) {
-  const prepared = {
-    ...(intent || {}),
-    policy_config: policyConfig || (intent && intent.policy_config) || undefined,
-    policy_context: (intent && intent.policy_context) || getInMemoryContext(),
-  };
+function evaluatePurchaseIntent(intent, customConfig = {}) {
+  const baseIntent = intent && typeof intent === 'object' ? intent : {};
+  const res = evaluate(baseIntent, customConfig);
   return {
-    intent_id: prepared.intent_id || `int_${Date.now()}`,
-    timestamp: prepared.timestamp || new Date().toISOString(),
-    user_prompt: prepared.user_prompt || "",
-    quarantine_extracted: prepared.quarantine_extracted,
-    checkout_verification: prepared.checkout_verification,
-    intent_alignment_pass: prepared.intent_alignment_pass,
-    policy_evaluation: evaluate(prepared),
+    intent_id: baseIntent.intent_id || `int_${Date.now()}`,
+    timestamp: new Date().toISOString(),
+    user_prompt: baseIntent.user_prompt || '',
+    quarantine_extracted: baseIntent.quarantine_extracted || null,
+    checkout_verification: baseIntent.checkout_verification || {
+      live_checkout_price: Number(baseIntent.quarantine_extracted?.quoted_price || 0),
+      price_drift_detected: false,
+    },
+    policy_evaluation: res,
   };
 }
 
 module.exports = {
   evaluate,
   evaluatePurchaseIntent,
+  extractPromptAutoApproveLimit,
+  setPolicyLimits,
+  getPolicyLimits,
+  setPolicyConfig: setPolicyLimits,
+  getPolicyConfig: getPolicyLimits,
   resetPolicyState,
   recordSuccessfulSpend,
-  getInMemoryContext,
+  DEFAULT_POLICY_CONFIG: DEFAULT_POLICY_LIMITS,
   POLICY_RULES,
-  DECISIONS,
 };

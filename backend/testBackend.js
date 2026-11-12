@@ -836,7 +836,8 @@ const body = (q, extra = {}) => ({
   check(
     'atomic budget reservation caps concurrent orders at velocity limit',
     calls.length === POLICY_RULES.MAX_TX_PER_MINUTE &&
-      concurrentResults.filter((result) => result.body.decision === 'DENY').length === 1
+      concurrentResults.filter((result) => result.body.decision === 'DENY').length === 1,
+    `orders=${calls.length}, denied=${concurrentResults.filter((result) => result.body.decision === 'DENY').length}, limit=${POLICY_RULES.MAX_TX_PER_MINUTE}, decisions=${concurrentResults.map((result) => result.body.decision + ':' + result.body.reason).join('; ')}`
   );
 
   console.log(failed ? `\n${failed} check(s) FAILED` : '\nAll backend checks passed');

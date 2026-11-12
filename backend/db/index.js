@@ -298,23 +298,26 @@ function sumAmounts(row) {
   return Number(value || 0);
 }
 
-function getPolicyContext() {
+function getPolicyContext(excludeIntentId) {
   const dayStart = new Date();
   dayStart.setUTCHours(0, 0, 0, 0);
   const minuteAgo = new Date(Date.now() - 60_000).toISOString();
   const placeholders = RESERVED_STATUSES.map(() => '?').join(', ');
+  const excludeCurrentIntent = typeof excludeIntentId === 'string' && excludeIntentId.length > 0;
+  const exclusion = excludeCurrentIntent ? ' AND intent_id != ?' : '';
+  const excludedParams = excludeCurrentIntent ? [excludeIntentId] : [];
   const daily = db
     .prepare(
       `SELECT COALESCE(SUM(CAST(approved_amount AS REAL)), 0) AS total
-       FROM intents WHERE status IN (${placeholders}) AND created_at >= ?`
+       FROM intents WHERE status IN (${placeholders}) AND created_at >= ?${exclusion}`
     )
-    .get(...RESERVED_STATUSES, dayStart.toISOString());
+    .get(...RESERVED_STATUSES, dayStart.toISOString(), ...excludedParams);
   const recent = db
     .prepare(
       `SELECT COUNT(*) AS n FROM intents
-       WHERE status IN (${placeholders}) AND created_at >= ?`
+       WHERE status IN (${placeholders}) AND created_at >= ?${exclusion}`
     )
-    .get(...RESERVED_STATUSES, minuteAgo);
+    .get(...RESERVED_STATUSES, minuteAgo, ...excludedParams);
   return {
     daily_spent: sumAmounts(daily),
     tx_last_minute: sumAmounts(recent),

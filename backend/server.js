@@ -276,3 +276,19 @@ if (require.main === module) {
 }
 
 module.exports = { app, createApp };
+
+// Guy 2: Add these 2 tiny routes to backend/server.js so the human can change policy limits live from the UI:
+const { getPolicyLimits, setPolicyLimits } = require("./security/policyEngine");
+
+app.get("/api/policy/limits", (req, res) => {
+  res.json(getPolicyLimits());
+});
+
+app.post("/api/policy/limits", (req, res) => {
+  const updated = setPolicyLimits({
+    autoApproveLimit: req.body.autoApproveLimit,
+    hardTransactionCap: req.body.hardTransactionCap,
+    dailyBudgetCap: req.body.dailyBudgetCap,
+  });
+  res.json(updated);
+});

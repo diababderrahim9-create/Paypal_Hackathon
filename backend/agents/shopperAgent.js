@@ -20,6 +20,7 @@ const {
 } = require("./quarantineLLM");
 const {
   evaluatePurchaseIntent,
+  extractPromptAutoApproveLimit,
   resetPolicyState,
   recordSuccessfulSpend,
 } = require("../security/policyEngine");
@@ -294,6 +295,13 @@ async function runWardenPipeline(userPrompt, options = {}) {
   const priceDrift =
     !live || livePrice !== quotedPrice || live.currency !== (chosenItem.currency || "USD");
   if (live && live.merchant_id !== chosenItem.merchant_id) intentAlignmentPass = false;
+  const promptAutoApproveLimit = extractPromptAutoApproveLimit(userPrompt);
+  const policyConfig = {
+    ...(options.policyConfig || {}),
+    ...(promptAutoApproveLimit !== null
+      ? { autoApproveLimit: promptAutoApproveLimit }
+      : {}),
+  };
 
   const quarantineExtracted = {
     product_id: chosenItem.product_id,
@@ -309,6 +317,8 @@ async function runWardenPipeline(userPrompt, options = {}) {
     intent_id: `int_${Date.now()}`,
     timestamp: new Date().toISOString(),
     user_prompt: userPrompt,
+    policy_config: policyConfig,
+    policy_context: { daily_spent: 0, tx_last_minute: 0 },
     agent_reasoning: agentReasoning,
     intent_alignment_pass: intentAlignmentPass,
     quarantine_extracted: quarantineExtracted,
@@ -359,7 +369,7 @@ async function runWardenPipeline(userPrompt, options = {}) {
     };
   }
 
-  const evaluatedIntent = evaluatePurchaseIntent(rawIntent, options.policyConfig);
+  const evaluatedIntent = evaluatePurchaseIntent(rawIntent, policyConfig);
   if (evaluatedIntent.policy_evaluation.decision === "ALLOW") {
     recordSuccessfulSpend(livePrice);
   }

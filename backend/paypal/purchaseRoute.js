@@ -17,6 +17,7 @@
 const crypto = require('crypto');
 const paypal = require('./paypalExecutor');
 const {
+  db,
   intents,
   getPolicyContext,
   getIdempotent,
@@ -53,6 +54,8 @@ function publicBase() {
   if (process.env.PUBLIC_BASE_URL) return String(process.env.PUBLIC_BASE_URL).replace(/\/$/, '');
   return `http://localhost:${process.env.PORT || 4000}`;
 }
+
+const asDbValue = (value) => (value === undefined ? null : value);
 
 async function processPurchase(body, deps = {}) {
   const d = {
@@ -179,7 +182,8 @@ async function processPurchase(body, deps = {}) {
     injection_detected: Boolean(q.injection_detected || (trustedProduct && trustedProduct.injection_detected)),
   };
   const persistIntent = (status, fields = {}) => {
-    d.intents.create({
+    const row = d.intents.get(intentId);
+    const payload = {
       intent_id: intentId,
       approved_amount: null,
       approved_currency: currency,
@@ -194,6 +198,50 @@ async function processPurchase(body, deps = {}) {
       user_prompt: body.user_prompt.slice(0, 500),
       intent_alignment_pass:
         fields.intent_alignment_pass === undefined ? null : fields.intent_alignment_pass,
+    };
+
+    if (row) {
+      db.prepare(
+        `UPDATE intents SET status=?, approved_amount=?, approved_currency=?, decision=?, product_id=?, request_summary=?, merchant=?, quoted_amount=?, risk_score=?, reason=?, user_prompt=?, intent_alignment_pass=?, updated_at=? WHERE intent_id=?`
+      ).run(
+        asDbValue(status),
+        null,
+        asDbValue(currency),
+        asDbValue(fields.decision || 'DENY'),
+        asDbValue(q.product_id),
+        asDbValue(summary),
+        asDbValue(fields.merchant || q.merchant_id),
+        asDbValue(quoted),
+        asDbValue(fields.risk_score ?? 100),
+        asDbValue(fields.reason || 'Purchase was denied'),
+        asDbValue(body.user_prompt && body.user_prompt.slice(0, 500)),
+        fields.intent_alignment_pass === undefined ? null : (fields.intent_alignment_pass ? 1 : 0),
+        new Date().toISOString(),
+        asDbValue(intentId)
+      );
+      return;
+    }
+
+    d.intents.create(payload);
+  };
+
+  const reserveIntent = () => {
+    const row = d.intents.get(intentId);
+    if (row) return;
+    d.intents.create({
+      intent_id: intentId,
+      approved_amount: null,
+      approved_currency: currency,
+      status: 'ORDER_CREATING',
+      decision: 'PENDING',
+      product_id: q.product_id,
+      request_summary: summary,
+      merchant: q.merchant_id,
+      quoted_amount: quoted,
+      risk_score: null,
+      reason: 'Policy evaluation in progress',
+      user_prompt: body.user_prompt.slice(0, 500),
+      intent_alignment_pass: null,
     });
   };
 
@@ -222,9 +270,11 @@ async function processPurchase(body, deps = {}) {
     body.intent_alignment_pass !== 0 &&
     promptMatchesProduct(body.user_prompt, q.product_id);
 
+  reserveIntent();
+
   let spend = { daily_spent: 0, tx_last_minute: 0 };
   try {
-    spend = d.getPolicyContext ? d.getPolicyContext() : spend;
+    spend = d.getPolicyContext ? d.getPolicyContext(intentId) : spend;
   } catch (err) {
     console.error('policy context failed closed:', err.message);
     const reason = 'Policy context unavailable; purchase denied';
@@ -339,28 +389,55 @@ async function processPurchase(body, deps = {}) {
   const approvalExpiresAt = approvalToken
     ? new Date(Date.now() + 30 * 60 * 1000).toISOString()
     : null;
-  d.intents.create({
-    intent_id: intentId,
-    paypal_order_id: null,
-    approved_amount: money(livePrice),
-    approved_currency: liveCurrency,
-    status: 'ORDER_CREATING',
-    decision,
-    human_approved: 0,
-    product_id: q.product_id,
-    request_summary: summary,
-    merchant: live.merchant_id || q.merchant_id,
-    quoted_amount: quoted,
-    risk_score: pe.risk_score ?? null,
-    reason,
-    user_prompt: intent.user_prompt,
-    rules_json: pe.rules_checked ? JSON.stringify(pe.rules_checked) : null,
-    intent_alignment_pass: alignment,
-    approval_token_hash: approvalToken
-      ? crypto.createHash('sha256').update(approvalToken).digest('hex')
-      : null,
-    approval_expires_at: approvalExpiresAt,
-  });
+  const existingIntentRow = d.intents.get(intentId);
+  if (existingIntentRow) {
+    db.prepare(
+      `UPDATE intents SET paypal_order_id=?, approved_amount=?, approved_currency=?, status=?, decision=?, human_approved=?, product_id=?, request_summary=?, merchant=?, quoted_amount=?, risk_score=?, reason=?, user_prompt=?, rules_json=?, intent_alignment_pass=?, approval_token_hash=?, approval_expires_at=?, updated_at=? WHERE intent_id=?`
+    ).run(
+      asDbValue(null),
+      asDbValue(money(livePrice)),
+      asDbValue(liveCurrency),
+      'ORDER_CREATING',
+      asDbValue(decision),
+      0,
+      asDbValue(q.product_id),
+      asDbValue(summary),
+      asDbValue(live.merchant_id || q.merchant_id),
+      asDbValue(quoted),
+      asDbValue(pe.risk_score ?? null),
+      asDbValue(reason),
+      asDbValue(intent.user_prompt),
+      asDbValue(pe.rules_checked ? JSON.stringify(pe.rules_checked) : null),
+      alignment ? 1 : 0,
+      approvalToken ? crypto.createHash('sha256').update(approvalToken).digest('hex') : null,
+      asDbValue(approvalExpiresAt),
+      new Date().toISOString(),
+      asDbValue(intentId)
+    );
+  } else {
+    d.intents.create({
+      intent_id: intentId,
+      paypal_order_id: null,
+      approved_amount: money(livePrice),
+      approved_currency: liveCurrency,
+      status: 'ORDER_CREATING',
+      decision,
+      human_approved: 0,
+      product_id: q.product_id,
+      request_summary: summary,
+      merchant: live.merchant_id || q.merchant_id,
+      quoted_amount: quoted,
+      risk_score: pe.risk_score ?? null,
+      reason,
+      user_prompt: intent.user_prompt,
+      rules_json: pe.rules_checked ? JSON.stringify(pe.rules_checked) : null,
+      intent_alignment_pass: alignment,
+      approval_token_hash: approvalToken
+        ? crypto.createHash('sha256').update(approvalToken).digest('hex')
+        : null,
+      approval_expires_at: approvalExpiresAt,
+    });
+  }
   d.appendAudit({
     ...baseAudit,
     payment_status: 'ORDER_CREATING',
